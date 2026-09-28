@@ -1,0 +1,88 @@
+name: Build Windows Portable
+
+on:
+  schedule:
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: ChatRoom release tag, for example v0.2.2. Leave empty for latest.
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve ChatRoom release
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:INPUT_VERSION) {
+            $tag = $env:INPUT_VERSION
+          } else {
+            $tag = gh api repos/gymZJ/ChatRoom/releases/latest --jq .tag_name
+          }
+          $releaseTags = @(gh api repos/gymZJ/ChatRoom-Windows-Portable/releases --paginate --jq '.[].tag_name')
+          $exists = ($releaseTags -contains $tag) -and ('${{ github.event_name }}' -ne 'workflow_dispatch')
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$($tag.TrimStart('v'))" >> $env:GITHUB_OUTPUT
+          "exists=$($exists.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Get ChatRoom release source
+        if: steps.release.outputs.exists != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: gymZJ/ChatRoom
+          ref: ${{ steps.release.outputs.tag }}
+          path: ChatRoom
+
+      - uses: actions/setup-node@v4
+        if: steps.release.outputs.exists != 'true'
+        with:
+          node-version: 24
+
+      - name: Build ChatRoom
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        working-directory: ChatRoom
+        run: |
+          npm ci
+          npm run build
+          npm prune --omit=dev
+
+      - name: Build portable package
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path portable\app | Out-Null
+          Copy-Item chatroom.cmd portable\chatroom.cmd
+          Copy-Item (Get-Command node).Source portable\node.exe
+          Copy-Item ChatRoom\package.json portable\app\package.json
+          Copy-Item ChatRoom\dist portable\app\dist -Recurse
+          Copy-Item ChatRoom\node_modules portable\app\node_modules -Recurse
+          $version = '${{ steps.release.outputs.version }}'
+          Compress-Archive -Path portable\* -DestinationPath "ChatRoom-$version-windows-x64-portable.zip"
+
+      - name: Publish release
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.release.outputs.tag }}'
+          $version = '${{ steps.release.outputs.version }}'
+          $zip = "ChatRoom-$version-windows-x64-portable.zip"
+          if (gh release view $tag 2>$null) {
+            gh release upload $tag $zip --clobber
+          } else {
+            gh release create $tag $zip --title "ChatRoom $version Windows Portable" --notes "Windows portable build of ChatRoom $version."
+          }
